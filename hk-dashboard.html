@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>香港智能儀表板</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang HK", "Microsoft JhengHei", sans-serif;
+  background: #0f172a;
+  color: #e2e8f0;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 12px;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+@media (min-width: 768px) {
+  .container { grid-template-columns: 1fr 1fr; }
+  .full { grid-column: 1 / -1; }
+}
+.card {
+  background: #1e293b;
+  border-radius: 16px;
+  padding: 16px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}
+.clock {
+  font-size: clamp(48px, 12vw, 96px);
+  font-weight: 700;
+  text-align: center;
+  letter-spacing: 2px;
+  color: #38bdf8;
+}
+.date-info { text-align: center; font-size: clamp(16px, 3vw, 20px); line-height: 1.6; }
+.yi { color: #4ade80; }
+.ji { color: #f87171; }
+.weather-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+.weather-item {
+  background: #334155;
+  padding: 10px;
+  border-radius: 12px;
+  text-align: center;
+  font-size: 14px;
+}
+.bus-list { max-height: 280px; overflow-y: auto; }
+.bus-item {
+  padding: 10px 8px;
+  border-bottom: 1px solid #334155;
+  cursor: pointer;
+  font-size: 15px;
+}
+.bus-item:hover, .bus-item:active { background: #334155; }
+.btn {
+  display: block;
+  width: 100%;
+  padding: 14px;
+  background: #0ea5e9;
+  color: white;
+  border: none;
+  border-radius: 12px;
+  font-size: 18px;
+  cursor: pointer;
+  margin-top: 8px;
+}
+.btn:active { opacity: 0.8; }
+#query-view {
+  display: none;
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: #0f172a;
+  z-index: 100;
+  padding: 16px;
+  overflow-y: auto;
+}
+#query-view.show { display: block; }
+input, select {
+  width: 100%;
+  padding: 12px;
+  margin: 8px 0;
+  border-radius: 8px;
+  border: 1px solid #475569;
+  background: #1e293b;
+  color: white;
+  font-size: 16px;
+}
+.status { font-size: 13px; color: #94a3b8; text-align: center; margin-top: 6px; }
+.humidity { font-size: 28px; color: #38bdf8; text-align: center; }
+</style>
+</head>
+<body>
+<div id="dashboard" class="container">
+  <div class="card full">
+    <div id="clock" class="clock">--:--:--</div>
+    <div id="date-info" class="date-info">載入中...</div>
+  </div>
+  <div class="card">
+    <h3 style="margin-bottom:8px;">天氣 (天文台)</h3>
+    <div id="humidity" class="humidity">濕度 --%</div>
+    <div id="weather-forecast" class="weather-grid"></div>
+    <div id="weather-status" class="status"></div>
+  </div>
+  <div class="card">
+    <h3 style="margin-bottom:8px;">附近巴士 / 小巴</h3>
+    <div id="bus-list" class="bus-list">正在定位及載入...</div>
+    <button class="btn" onclick="openQuery()">查詢指定路線</button>
+    <div id="bus-status" class="status"></div>
+  </div>
+</div>
+
+<div id="query-view">
+  <button class="btn" style="background:#64748b;" onclick="closeQuery()">返回儀表板</button>
+  <h2 style="margin:16px 0;">路線查詢</h2>
+  <select id="company">
+    <option value="kmb">九巴 / 龍運 (KMB/LWB)</option>
+    <option value="gmb">綠色小巴 (GMB)</option>
+  </select>
+  <input type="text" id="route-input" placeholder="輸入路線號碼，例如 1A 或 69" autocomplete="off">
+  <button class="btn" onclick="searchRoute()">查詢</button>
+  <div id="query-result" style="margin-top:16px;"></div>
+  <div id="idle-hint" class="status">待機 2 分鐘後自動返回儀表板</div>
+</div>
+
+<script src="https://unpkg.com/lunar-javascript@1.7.8/lunar.js"></script>
+<script>
+var idleTimer = null;
+var IDLE_MS = 120000; // 2 minutes
+var userLat = null, userLng = null;
+var kmbStops = null;
+
+function pad(n) { return n < 10 ? '0' + n : n; }
+function updateClock() {
+  var now = new Date();
+  var h = pad(now.getHours());
+  var m = pad(now.getMinutes());
+  var s = pad(now.getSeconds());
+  document.getElementById('clock').textContent = h + ':' + m + ':' + s;
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+function updateDate() {
+  try {
+    var now = new Date();
+    var solar = Solar.fromDate(now);
+    var lunar = solar.getLunar();
+    var yi = lunar.getDayYi().join('、') || '無';
+    var ji = lunar.getDayJi().join('、') || '無';
+    var html = solar.toYmd() + ' ' + ['日','一','二','三','四','五','六'][now.getDay()] + '<br>';
+    html += '農曆 ' + lunar.toString() + '<br>';
+    html += '<span class="yi">宜：' + yi + '</span><br>';
+    html += '<span class="ji">忌：' + ji + '</span>';
+    document.getElementById('date-info').innerHTML = html;
+  } catch (e) {
+    document.getElementById('date-info').textContent = '日期載入失敗';
+  }
+}
+updateDate();
+setInterval(updateDate, 60000);
+
+function fetchWeather() {
+  var status = document.getElementById('weather-status');
+  status.textContent = '載入天氣中...';
+  Promise.all([
+    fetch('https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=rhrread&lang=tc').then(r => r.json()),
+    fetch('https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=fnd&lang=tc').then(r => r.json())
+  ]).then(function(results) {
+    var current = results[0];
+    var forecast = results[1];
+    var hum = '--';
+    if (current.humidity && current.humidity.data && current.humidity.data.length) {
+      hum = current.humidity.data[0].value;
+    }
+    document.getElementById('humidity').textContent = '濕度 ' + hum + '%';
+    var grid = document.getElementById('weather-forecast');
+    grid.innerHTML = '';
+    var days = (forecast.weatherForecast || []).slice(0, 3);
+    days.forEach(function(d) {
+      var div = document.createElement('div');
+      div.className = 'weather-item';
+      var date = d.forecastDate || '';
+      var week = d.week || '';
+      var max = (d.forecastMaxtemp && d.forecastMaxtemp.value) || '--';
+      var min = (d.forecastMintemp && d.forecastMintemp.value) || '--';
+      var wx = (d.forecastWeather || '').substring(0, 40);
+      div.innerHTML = '<strong>' + (date.slice(6) + '/' + date.slice(4,6)) + ' ' + week + '</strong><br>' +
+                      max + '° / ' + min + '°<br><small>' + wx + '</small>';
+      grid.appendChild(div);
+    });
+    status.textContent = '更新：' + (forecast.updateTime || '').replace('T', ' ').slice(0,16);
+  }).catch(function() {
+    status.textContent = '天氣資料暫時無法取得';
+  });
+}
+fetchWeather();
+setInterval(fetchWeather, 600000);
+
+function haversine(lat1, lon1, lat2, lon2) {
+  var R = 6371;
+  var dLat = (lat2 - lat1) * Math.PI / 180;
+  var dLon = (lon2 - lon1) * Math.PI / 180;
+  var a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+          Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+          Math.sin(dLon/2) * Math.sin(dLon/2);
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+function loadNearbyBus() {
+  var list = document.getElementById('bus-list');
+  var status = document.getElementById('bus-status');
+  if (!navigator.geolocation) {
+    list.textContent = '此裝置不支援定位';
+    return;
+  }
+  status.textContent = '正在取得位置...';
+  navigator.geolocation.getCurrentPosition(function(pos) {
+    userLat = pos.coords.latitude;
+    userLng = pos.coords.longitude;
+    status.textContent = '位置已取得，載入巴士站...';
+    if (kmbStops) {
+      showNearby(kmbStops);
+      return;
+    }
+    fetch('https://data.etabus.gov.hk/v1/transport/kmb/stop')
+      .then(r => r.json())
+      .then(function(data) {
+        kmbStops = data.data || [];
+        showNearby(kmbStops);
+      })
+      .catch(function() {
+        list.textContent = '無法載入巴士站資料';
+      });
+  }, function(err) {
+    list.textContent = '定位失敗，請允許位置權限後重新整理';
+    status.textContent = err.message;
+  }, { enableHighAccuracy: false, timeout: 10000, maximumAge: 300000 });
+}
+
+function showNearby(stops) {
+  var list = document.getElementById('bus-list');
+  var status = document.getElementById('bus-status');
+  var nearby = stops.map(function(s) {
+    var dist = haversine(userLat, userLng, parseFloat(s.lat), parseFloat(s.long));
+    return { stop: s, dist: dist };
+  }).filter(function(x) { return x.dist < 0.8; })
+    .sort(function(a, b) { return a.dist - b.dist; })
+    .slice(0, 8);
+
+  if (nearby.length === 0) {
+    list.textContent = '附近 800 米內沒有九巴站';
+    status.textContent = '';
+    return;
+  }
+  list.innerHTML = '';
+  status.textContent = '正在查詢到站時間...';
+  var pending = nearby.length;
+  nearby.forEach(function(item) {
+    var stopId = item.stop.stop;
+    var name = item.stop.name_tc || item.stop.name_en;
+    fetch('https://data.etabus.gov.hk/v1/transport/kmb/stop-eta/' + stopId)
+      .then(r => r.json())
+      .then(function(etaData) {
+        var etas = (etaData.data || []).slice(0, 3);
+        var routes = {};
+        etas.forEach(function(e) {
+          if (!routes[e.route]) routes[e.route] = [];
+          var mins = '即將';
+          if (e.eta) {
+            var diff = Math.round((new Date(e.eta) - new Date()) / 60000);
+            mins = diff <= 0 ? '即將' : diff + ' 分鐘';
+          }
+          routes[e.route].push(mins + (e.dest_tc ? ' → ' + e.dest_tc : ''));
+        });
+        var div = document.createElement('div');
+        div.className = 'bus-item';
+        var routeText = Object.keys(routes).map(function(r) {
+          return r + ': ' + routes[r].join(', ');
+        }).join('<br>') || '暫無班次';
+        div.innerHTML = '<strong>' + name + '</strong> (' + item.dist.toFixed(2) + ' km)<br><small>' + routeText + '</small>';
+        div.onclick = function() { openQueryWithRoute(Object.keys(routes)[0] || ''); };
+        list.appendChild(div);
+        pending--;
+        if (pending <= 0) status.textContent = '已顯示附近九巴站';
+      })
+      .catch(function() {
+        pending--;
+        if (pending <= 0) status.textContent = '部分到站資料無法取得';
+      });
+  });
+}
+
+function openQuery(route) {
+  document.getElementById('dashboard').style.display = 'none';
+  var qv = document.getElementById('query-view');
+  qv.classList.add('show');
+  if (route) document.getElementById('route-input').value = route;
+  resetIdle();
+  document.addEventListener('click', resetIdle);
+  document.addEventListener('touchstart', resetIdle);
+  document.addEventListener('keydown', resetIdle);
+}
+
+function openQueryWithRoute(route) {
+  openQuery(route);
+}
+
+function closeQuery() {
+  document.getElementById('query-view').classList.remove('show');
+  document.getElementById('dashboard').style.display = '';
+  clearTimeout(idleTimer);
+  document.removeEventListener('click', resetIdle);
+  document.removeEventListener('touchstart', resetIdle);
+  document.removeEventListener('keydown', resetIdle);
+}
+
+function resetIdle() {
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(function() {
+    closeQuery();
+  }, IDLE_MS);
+}
+
+function searchRoute() {
+  var company = document.getElementById('company').value;
+  var route = document.getElementById('route-input').value.trim().toUpperCase();
+  var result = document.getElementById('query-result');
+  if (!route) {
+    result.innerHTML = '請輸入路線號碼';
+    return;
+  }
+  result.innerHTML = '查詢中...';
+  resetIdle();
+  if (company === 'kmb') {
+    fetch('https://data.etabus.gov.hk/v1/transport/kmb/route/' + route)
+      .then(r => r.json())
+      .then(function(data) {
+        var routes = data.data || [];
+        if (routes.length === 0) {
+          result.innerHTML = '找不到此九巴路線';
+          return;
+        }
+        var html = '<h3>' + route + '</h3>';
+        routes.forEach(function(r) {
+          html += '<div class="card" style="margin:10px 0;"><strong>' + (r.bound === 'O' ? '往' : '回') + ' ' + (r.dest_tc || r.dest_en) + '</strong><br>';
+          html += '服務類型：' + r.service_type + '<br>';
+          html += '<small>由 ' + (r.orig_tc || '') + ' 開出</small></div>';
+        });
+        result.innerHTML = html + '<p class="status">提示：附近站到站時間請返回儀表板查看，或使用官方 App 獲取更詳細資料。</p>';
+      })
+      .catch(function() {
+        result.innerHTML = '查詢失敗，請稍後再試';
+      });
+  } else {
+    // GMB basic
+    result.innerHTML = '綠色小巴查詢功能開發中，請先使用九巴查詢。<br>官方資料來源：data.etagmb.gov.hk';
+  }
+}
+
+// Init
+loadNearbyBus();
+</script>
+</body>
+</html>
